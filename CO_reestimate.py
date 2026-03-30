@@ -132,7 +132,7 @@ def load_roster(term: str) -> pd.DataFrame:
     ]
     roster = old_les_df[keep].copy()
     # harmonize idcol names
-    roster["roster_id"] = roster[id_col]
+    roster["roster_id"] = pd.to_numeric(roster[id_col], errors="coerce").astype("Int64")
     roster["roster_id_col"] = id_col
     roster["chamber_code"] = roster["chamber"].map({"House": "H", "Senate": "S"})
     # construct data_name for zero-LES legislators who have NA col
