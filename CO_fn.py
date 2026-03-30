@@ -34,7 +34,7 @@ CO_STEP_TERMS = {
 
 
 def evaluate_bill_hist(bill_hist: pd.DataFrame, bill_id: str, session: str):
-    action = bill_hist["action"].fillna("")
+    action = bill_hist["action"]
 
     # constrain the actions over which we evlaute non law steps to the run of ations in the chamber of 
     # before any chamber switching occurs
