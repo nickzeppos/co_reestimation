@@ -16,6 +16,7 @@ COMMEM_DIR = DATA_DIR / "commem"
 SS_DIR = DATA_DIR / "ss"
 OLD_LES_DIR = DATA_DIR / "old_LES_outputs"
 OUTPUT_DIR = _HERE / "outputs"
+KLARNER_CSV = DATA_DIR / "klarner_co.csv"
 KEEP_TYPES = {"HB", "SB"}  # bill type filter
 
 # output df cols
@@ -71,40 +72,37 @@ def chamber_code_to_name(code: str) -> str:
     return "House" if code == "H" else "Senate"
 
 
-def normalize_bill_title(s: str) -> str:
-    if pd.isna(s):
-        return ""
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", str(s).lower())).strip()
-
 
 def normalize_ss_bill_id(bill_no: str, year: int) -> str:
+    # SS bill IDs come in two formats
+    # 1 - already has YY: "HB 19-1025" or "HB19-1025" here we just zero pad and strip
+    # 2 - no YY: "HB 1025" in which case we inject YY from parsed date year
     s = str(bill_no).upper().replace(" ", "")
     m = re.match(r"^(HB|SB)(\d{2}[A-Z]?)-(\d+)$", s)
     if m:
-        p, yy, n = m.groups()
-        n_int = int(n)
-        width = 3 if n_int < 1000 else len(str(n_int))
-        return f"{p}{yy}-{str(n_int).zfill(width)}"
+        # 1 - has yy, just zero-pad the bill number
+        bill_type, yy, bill_number = m.groups()
+        return f"{bill_type}{yy}-{int(bill_number):03d}"
     m = re.match(r"^(HB|SB)(\d+)$", s)
     if m:
-        p, n = m.groups()
-        n_int = int(n)
-        width = 3 if n_int < 1000 else len(str(n_int))
+        # 2 - no YY, inject it from the bill's year
+        bill_type, bill_number = m.groups()
         yy = str(year)[-2:]
-        return f"{p}{yy}-{str(n_int).zfill(width)}"
+        return f"{bill_type}{yy}-{int(bill_number):03d}"
     return s
 
 
-# loaders
-# def load_old_les_dfs():
-#     frames = {}
-#     for path in sorted(OLD_LES_DIR.glob(OLD_LES_GLOB)):
-#         df = pd.read_csv(path)
-#         term = re.sub(r"^CO_LES_|\.csv$", "", path.name)
-#         frames[term] = df
-#     if not frames:
-#         raise FileNotFoundError(f"No files matched {OLD_LES_DIR / OLD_LES_GLOB}")
-#     return frames
+def load_klarner_co() -> pd.DataFrame:
+    """Load CO klarner data from pre-exported CSV (see export_klarner_co.R).
+
+    Returns a df with columns: klarner_id, party, district, term, sen.
+    """
+    if not KLARNER_CSV.exists():
+        raise FileNotFoundError(
+            f"Klarner CSV not found at {KLARNER_CSV}. "
+            "Run: Rscript export_klarner_co.R"
+        )
+    return pd.read_csv(KLARNER_CSV)
 
 
 def load_roster(term: str) -> pd.DataFrame:
@@ -136,16 +134,29 @@ def load_roster(term: str) -> pd.DataFrame:
     # harmonize idcol names
     roster["roster_id"] = roster[id_col]
     roster["roster_id_col"] = id_col
-    roster["chamber_code"] = (
-        roster["chamber"].map({"House": "H", "Senate": "S"}).fillna(roster["chamber"])
-    )
-    # construct data_name for zero-LES legislators who have none
+    roster["chamber_code"] = roster["chamber"].map({"House": "H", "Senate": "S"})
+    # construct data_name for zero-LES legislators who have NA col
     # format: "f. lastname" derived from full sponsor name
     missing = roster["data_name"].isna()
     if missing.any():
+        # for zero-LES legislators, derive data_name from sponsor as "f. lastname"
         roster.loc[missing, "data_name"] = roster.loc[missing, "sponsor"].apply(
             lambda s: f"{s.split()[0][0].lower()}. {' '.join(s.split()[1:]).lower()}"
         )
+
+    # backfill party/district from klarner for terms that predate legiscan
+    if "party" not in roster.columns or roster["party"].isna().all():
+        klarner = load_klarner_co()
+        klarner_term = klarner[klarner["term"] == term].copy()
+        # map chamber_code to klarner sen flag
+        klarner_term["chamber_code"] = klarner_term["sen"].map({1: "S", 0: "H"})
+        klarner_term = klarner_term.rename(columns={"klarner_id": "roster_id"})
+        roster = roster.merge(
+            klarner_term[["roster_id", "chamber_code", "party", "district"]],
+            on=["roster_id", "chamber_code"],
+            how="left",
+        )
+
     return roster
 
 
@@ -256,6 +267,8 @@ def load_bill_details(term: str, roster: pd.DataFrame) -> pd.DataFrame:
             .str.strip()
             .str.lower()
         )
+        
+        # have to actually use derive fn on new data
         not_2015 = ~is_2015
         bill_details.loc[not_2015, "data_name"] = [
             derive_data_name(ps, roster_by_chamber[cc])
@@ -272,8 +285,8 @@ def load_bill_details(term: str, roster: pd.DataFrame) -> pd.DataFrame:
             )
         ]
 
-    # term-specific overrides where automated matching resolves to the wrong legislator
     # I'm not sure we need these anymore w/ the new data.
+    # term-specific overrides where automated matching resolves to the wrong legislator
     # if term == "2015_2016":
     #     bill_details.loc[bill_details["bill_id"] == "HB16-1192", "data_name"] = (
     #         "kagan d."
@@ -407,7 +420,7 @@ def derive_data_name(primary_sponsors: str, roster: pd.DataFrame) -> str:
     roster_names = roster["data_name"].tolist()
 
     # look up in roster by last name — strip initial from data_name to compare
-    # handles both "initial. lastname" and "lastname initial." formats
+    # handle both "initial. lastname" and "lastname initial." formats
     matches = []
     for data_name in roster_names:
         dn_last = re.sub(r"^[a-z]\. ", "", data_name)
@@ -415,7 +428,7 @@ def derive_data_name(primary_sponsors: str, roster: pd.DataFrame) -> str:
         if dn_last == sponsor_last:
             matches.append(data_name)
 
-    # fallback: compound last names where bill data uses only the final surname component
+    # fallback: compound last names where bill data uses only the final surname 
     # e.g. "beth humenik" -> "humenik" matches "martinez humenik b." via suffix
     if not matches:
         for data_name in roster_names:
@@ -442,20 +455,27 @@ def derive_data_name(primary_sponsors: str, roster: pd.DataFrame) -> str:
         if len(narrowed) == 1:
             return narrowed[0]
 
+    # raise on ambiguity so we can root it out
     raise ValueError(f"Ambiguous roster match for sponsor '{raw}': {matches}")
 
 
-def build_bill_stages(bills: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
+def compute_leg_achievement(bills: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
+    # map bill_id, session -> subset in bill history
+    # ie pre loop filter
     hist_keys = {
         (bid, ses): g
         for (bid, ses), g in hist.groupby(["bill_id", "session"], sort=False)
     }
-    rows = []
+    acc = []
+    
     for _, b in bills.iterrows():
         key = (b["bill_id"], b["session"])
+        # grab the bill history
         h = hist_keys.get(key, pd.DataFrame(columns=hist.columns))
+        # evaluate
         aic, abc, pc, law = fn.evaluate_bill_hist(h, b["bill_id"], b["session"])
-        rows.append(
+        # accumulate
+        acc.append(
             {
                 "bill_id": b["bill_id"],
                 "term": b["term"],
@@ -470,94 +490,95 @@ def build_bill_stages(bills: pd.DataFrame, hist: pd.DataFrame) -> pd.DataFrame:
                 "chamber_code": b["chamber_code"],
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(acc)
 
 
 def load_term_commem(term: str) -> pd.DataFrame:
-    path = COMMEM_DIR / "CO_Commem_Bills.csv"
-    if not path.exists():
-        return pd.DataFrame(columns=["bill_id", "term", "session", "commem"])
-    c = pd.read_csv(path)
-    c = c[c["term"] == term].copy()
-    if c.empty:
-        return c
-    c["bill_id"] = c["bill_id"].astype(str).str.upper().str.replace(" ", "", regex=False)
-    c["session"] = c["session"].astype(str).str.replace("-S", "-SS", regex=False)
-    c["commem"] = c["commem"].fillna(0).astype(int)
-    return c[["bill_id", "term", "session", "commem"]].drop_duplicates()
+    # 2019+ terms have their own per-term file; older terms are in a single combined file
+    term_path = COMMEM_DIR / f"CO_Commem_Bills_{term}.csv"
+    combined_path = COMMEM_DIR / "CO_Commem_Bills.csv"
+
+    if term_path.exists():
+        # prefer the term specific commem sheets
+        c = pd.read_csv(term_path)
+    elif combined_path.exists():
+        # use combined sheet if no term specific sheet
+        c = pd.read_csv(combined_path)
+        c = c[c["term"] == term].copy()
+        if c.empty:
+            raise ValueError(f"No commem rows found for term {term} in {combined_path}")
+        # combined file needs bill_id and session harmonized to match bill details
+        c["bill_id"] = c["bill_id"].astype(str).str.upper().str.replace(" ", "", regex=False)
+        c["session"] = c["session"].astype(str).str.replace("-S", "-SS", regex=False)
+
+    c["commem"] = c["commem"].astype(int)
+    return c[["bill_id", "term", "session", "commem"]]
 
 
 def load_term_ss(term: str) -> pd.DataFrame:
+    # SS files are annual, so concat both years of the term
     year_1, year_2 = parse_term(term)
     parts = []
     for y in [year_1, year_2]:
         p = SS_DIR / f"CO_SS_Bills_{y}.csv"
-        if p.exists():
-            d = pd.read_csv(p)
-            d["_fallback_year"] = y
-            parts.append(d)
-    if not parts:
-        return pd.DataFrame(columns=["bill_id", "ss_year", "title_norm", "SS"])
+        if not p.exists():
+            raise FileNotFoundError(f"Missing SS bills file: {p}")
+        parts.append(pd.read_csv(p))
     ss = pd.concat(parts, ignore_index=True)
+    # parse the PVS date string to extract year; "Sept" and trailing dots are
+    # common formatting quirks in the source data
     dt = pd.to_datetime(
         ss["Date"].astype(str)
         .str.replace("Sept", "Sep", regex=False)
         .str.replace(".", "", regex=False),
-        errors="coerce",
+        format="mixed",
     )
-    ss["ss_year"] = dt.dt.year.fillna(ss["_fallback_year"]).astype(int)
+    # ss_year drives bill ID normalization (the YY in e.g. HB19-1025)
+    ss["ss_year"] = dt.dt.year.astype(int)
     ss["bill_id"] = [
         normalize_ss_bill_id(b, y) for b, y in zip(ss["Bill No"], ss["ss_year"])
     ]
-    ss["title_norm"] = ss["Title"].map(normalize_bill_title)
     ss["SS"] = 1
-    return ss[["bill_id", "ss_year", "title_norm", "SS"]].drop_duplicates()
+    return ss[["bill_id", "ss_year", "SS"]].drop_duplicates()
 
 
 def apply_ss_and_commem(
     stages: pd.DataFrame, ss_term: pd.DataFrame, commem_term: pd.DataFrame
 ) -> pd.DataFrame:
     out = stages
+    # derive year from session string (eg "2019-RS" -> 2019) for SS matching
     out["ss_year"] = out["session"].astype(str).str[:4].astype(int)
-    out["title_norm"] = out["title"].map(normalize_bill_title)
     out["SS"] = 0
 
+    # flag bills that appear in the SS list, matched on bill_id + year
     if not ss_term.empty:
         for _, s in ss_term.iterrows():
             cand_idx = out.index[
                 (out["bill_id"] == s["bill_id"]) & (out["ss_year"] == s["ss_year"])
             ]
-            if len(cand_idx) == 0:
-                continue
-            if len(cand_idx) == 1:
-                out.loc[cand_idx, "SS"] = 1
-                continue
-            title_idx = out.index[
-                out.index.isin(cand_idx) & (out["title_norm"] == s["title_norm"])
-            ]
-            out.loc[title_idx if len(title_idx) > 0 else cand_idx, "SS"] = 1
+            out.loc[cand_idx, "SS"] = 1
 
+    # join commem flags; if a bill is both SS and commem, SS wins
     out = out.merge(commem_term, on=["bill_id", "term", "session"], how="left")
     out["commem"] = out["commem"].fillna(0).astype(int)
     out.loc[(out["SS"] == 1) & (out["commem"] == 1), "commem"] = 0
-    return out.drop(columns=["ss_year", "title_norm"])
+    return out.drop(columns=["ss_year"])
 
 
 def main():
     term = "2023_2024"
     print(f"Re-estimating CO {term}")
+    
+    # load phase
     roster = load_roster(term)
     details = load_bill_details(term, roster)
     histories = load_bill_histories(term)
-
-    # drop bills whose session has no history rows
-    valid_sessions = set(histories["session"].unique())
-    details = details[details["session"].isin(valid_sessions)]
-
-    stages = build_bill_stages(details, histories)
+    
+    # 
+    leg_achievement = compute_leg_achievement(details, histories)
     commem = load_term_commem(term)
     ss = load_term_ss(term)
-    bill_data = apply_ss_and_commem(stages, ss, commem)
+    bill_data = apply_ss_and_commem(leg_achievement, ss, commem)
 
     les = fn.calculate_les(bill_data, roster, term, ss_weight=10, reg_weight=5, com_weight=1)
     les_nw = fn.calculate_les(bill_data, roster, term, ss_weight=5, reg_weight=5, com_weight=5)

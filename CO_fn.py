@@ -36,17 +36,17 @@ CO_STEP_TERMS = {
 def evaluate_bill_hist(bill_hist: pd.DataFrame, bill_id: str, session: str):
     action = bill_hist["action"].fillna("")
 
+    # constrain the actions over which we evlaute non law steps to the run of ations in the chamber of 
+    # before any chamber switching occurs
     init_chamber = "Senate" if bill_id.upper().startswith("S") else "House"
     other_chamber = "House" if init_chamber == "Senate" else "Senate"
-
-    in_idx = bill_hist.index[bill_hist["chamber"] == init_chamber]
-    out_idx = bill_hist.index[bill_hist["chamber"] == other_chamber]
-
-    if len(in_idx) > 0 and len(out_idx) > 0:
-        first_in = min(in_idx)
-        switch = [ix for ix in out_idx if ix > first_in]
-        if switch:
-            chamber_h = action[bill_hist.index < min(switch)]
+    in_orders = bill_hist.loc[bill_hist["chamber"] == init_chamber, "order"]
+    out_orders = bill_hist.loc[bill_hist["chamber"] == other_chamber, "order"]
+    if len(in_orders) > 0 and len(out_orders) > 0:
+        first_in = in_orders.min()
+        switch = out_orders[out_orders > first_in]
+        if len(switch) > 0:
+            chamber_h = action[bill_hist["order"] < switch.min()]
         else:
             chamber_h = action
     else:
@@ -64,7 +64,7 @@ def evaluate_bill_hist(bill_hist: pd.DataFrame, bill_id: str, session: str):
     elif pc == 1:
         abc = 1
 
-    # CO-specific post checks from old script
+    # CO-specific checks from old script
     if pc == 0 and action.str.contains("third reading passed", regex=False, case=False).any():
         abc = 1
         pc = 1
@@ -122,7 +122,7 @@ def calculate_les(
                 "party": leg.get("party"),
                 "district": leg.get("district"),
                 "roster_id": leg.get("roster_id"),
-                "roster_id_col": leg.get("roster_id_col"),
+                "roster_id_col": leg.get("roster_id_col"), # for provenenace sake, tell me if this is from legiscan or klarner
             }
 
             if sponsored.empty:
