@@ -7,20 +7,19 @@ out_path <- "data/klarner_co.csv"
 load(rdata_path) # loads `table`
 
 co <- table %>%
-  # filter on CO winners
+  # all CO winners — keep raw election year so Python can do
+  # "most recent election before term's second year" lookup
+  # that seems to be how peoeple who aren't listed in the correct term get resolved when klarner data is joined
+  # im not doing the join right now, just going to make the data available
   filter(toupper(sab) == "CO", outcome == "w") %>%
-  mutate(term = paste0(year + 1, "_", year + 2)) %>%
-  # take only one outcome per term, arrange by year distinct
-  # effectively gives us most recent/last outcome in a given term
   arrange(desc(year)) %>%
-  distinct(candid, term, sen, .keep_all = TRUE) %>%
-  # fix up the columns so that we don't have to do any more cleaning in python
+  distinct(candid, year, sen, .keep_all = TRUE) %>%
   mutate(
     chamber_prefix = ifelse(sen == 1, "SD", "HD"),
-    district = sprintf("%s-%03d", chamber_prefix, as.integer(dno)), # district col should be prefixed
-    party = toupper(partyz) # this seems to be the party col the old script uses 
+    district = sprintf("%s-%03d", chamber_prefix, as.integer(dno)),
+    party = toupper(partyz)
   ) %>%
-  # only take stuff we need to reestimate
-  select(klarner_id = candid, party, district, term, sen)
+  select(klarner_id = candid, party, district, year, sen)
 
 write.csv(co, out_path, row.names = FALSE)
+cat("Written", nrow(co), "rows to", out_path, "\n")

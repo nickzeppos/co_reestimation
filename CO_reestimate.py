@@ -16,7 +16,6 @@ COMMEM_DIR = DATA_DIR / "commem"
 SS_DIR = DATA_DIR / "ss"
 OLD_LES_DIR = DATA_DIR / "old_LES_outputs"
 OUTPUT_DIR = _HERE / "outputs"
-KLARNER_CSV = DATA_DIR / "klarner_co.csv"
 KEEP_TYPES = {"HB", "SB"}  # bill type filter
 
 # output df cols
@@ -92,18 +91,6 @@ def normalize_ss_bill_id(bill_no: str, year: int) -> str:
     return s
 
 
-def load_klarner_co() -> pd.DataFrame:
-    """Load CO klarner data from pre-exported CSV (see export_klarner_co.R).
-
-    Returns a df with columns: klarner_id, party, district, term, sen.
-    """
-    if not KLARNER_CSV.exists():
-        raise FileNotFoundError(
-            f"Klarner CSV not found at {KLARNER_CSV}. "
-            "Run: Rscript export_klarner_co.R"
-        )
-    return pd.read_csv(KLARNER_CSV)
-
 
 def load_roster(term: str) -> pd.DataFrame:
 
@@ -142,19 +129,6 @@ def load_roster(term: str) -> pd.DataFrame:
         # for zero-LES legislators, derive data_name from sponsor as "f. lastname"
         roster.loc[missing, "data_name"] = roster.loc[missing, "sponsor"].apply(
             lambda s: f"{s.split()[0][0].lower()}. {' '.join(s.split()[1:]).lower()}"
-        )
-
-    # backfill party/district from klarner for terms that predate legiscan
-    if "party" not in roster.columns or roster["party"].isna().all():
-        klarner = load_klarner_co()
-        klarner_term = klarner[klarner["term"] == term].copy()
-        # map chamber_code to klarner sen flag
-        klarner_term["chamber_code"] = klarner_term["sen"].map({1: "S", 0: "H"})
-        klarner_term = klarner_term.rename(columns={"klarner_id": "roster_id"})
-        roster = roster.merge(
-            klarner_term[["roster_id", "chamber_code", "party", "district"]],
-            on=["roster_id", "chamber_code"],
-            how="left",
         )
 
     return roster
@@ -565,8 +539,9 @@ def apply_ss_and_commem(
     return out.drop(columns=["ss_year"])
 
 
+
 def main():
-    term = "2023_2024"
+    term = "2017_2018"
     print(f"Re-estimating CO {term}")
     
     # load phase
