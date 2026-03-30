@@ -541,7 +541,7 @@ def apply_ss_and_commem(
 
 
 def main():
-    term = "2017_2018"
+    term = "2015_2016"
     print(f"Re-estimating CO {term}")
     
     # load phase
