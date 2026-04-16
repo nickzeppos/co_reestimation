@@ -72,6 +72,12 @@ def chamber_code_to_name(code: str) -> str:
 
 
 
+def normalize_bill_details_sb_id(s: pd.Series) -> pd.Series:
+    # bill details senate bill ids are 3-digit padded (SB19-001); pad to 4
+    # to match bill ids in commem, and the ss bill ids we get after normalize_ss_bill_id
+    return s.str.replace(r"-(\d{3})$", r"-0\1", regex=True)
+
+
 def normalize_ss_bill_id(bill_no: str, year: int) -> str:
     # SS bill IDs come in two formats
     # 1 - already has YY: "HB 19-1025" or "HB19-1025" here we just zero pad and strip
@@ -81,13 +87,13 @@ def normalize_ss_bill_id(bill_no: str, year: int) -> str:
     if m:
         # 1 - has yy, just zero-pad the bill number
         bill_type, yy, bill_number = m.groups()
-        return f"{bill_type}{yy}-{int(bill_number):03d}"
+        return f"{bill_type}{yy}-{int(bill_number):04d}"
     m = re.match(r"^(HB|SB)(\d+)$", s)
     if m:
         # 2 - no YY, inject it from the bill's year
         bill_type, bill_number = m.groups()
         yy = str(year)[-2:]
-        return f"{bill_type}{yy}-{int(bill_number):03d}"
+        return f"{bill_type}{yy}-{int(bill_number):04d}"
     return s
 
 
@@ -175,11 +181,14 @@ def load_bill_details(term: str, roster: pd.DataFrame) -> pd.DataFrame:
     # So in practice this is just dropping 1 record from 23/24 term.
 
     # bill_id normalize, derive chamber
+    # pad 3-digit bill numbers to 4 digits to match commem format and old R script
+    # e.g. SB19-001 -> SB19-0001; HB19-1001 stays HB19-1001
     bill_details["bill_id"] = (
         bill_details["bill_id"]
         .astype(str)
         .str.upper()
         .str.replace(" ", "", regex=False)
+        .pipe(normalize_bill_details_sb_id)
     )
     bill_details["chamber_code"] = np.where(
         bill_details["bill_id"].str.startswith("H"), "H", "S"
@@ -361,6 +370,7 @@ def load_bill_histories(term: str) -> pd.DataFrame:
         .astype(str)
         .str.upper()
         .str.replace(" ", "", regex=False)
+        .pipe(normalize_bill_details_sb_id)
     )
     bill_histories = bill_histories.sort_values(
         ["session", "bill_id", "order"], kind="stable"
@@ -481,10 +491,9 @@ def load_term_commem(term: str) -> pd.DataFrame:
         c = c[c["term"] == term].copy()
         if c.empty:
             raise ValueError(f"No commem rows found for term {term} in {combined_path}")
-        # combined file needs bill_id and session harmonized to match bill details
-        c["bill_id"] = c["bill_id"].astype(str).str.upper().str.replace(" ", "", regex=False)
         c["session"] = c["session"].astype(str).str.replace("-S", "-SS", regex=False)
 
+    c["bill_id"] = c["bill_id"].astype(str).str.upper().str.replace(" ", "", regex=False)
     c["commem"] = c["commem"].astype(int)
     return c[["bill_id", "term", "session", "commem"]]
 
@@ -519,7 +528,7 @@ def load_term_ss(term: str) -> pd.DataFrame:
 # Apply manual SS bill id fixes
 SS_ID_FIXES = {
     "2019_2020": {"SB19-1025": "HB19-1025"},
-    "2021_2022": {"HB21-002": "HB21-1002", "HB21-003": "HB21-1003"},
+    "2021_2022": {"HB21-0002": "HB21-1002", "HB21-0003": "HB21-1003"},
     "2023_2024": {
         "SB23-1196": "HB23-1196",
         "SB23-1006": "HB23-1006",
