@@ -516,6 +516,25 @@ def load_term_ss(term: str) -> pd.DataFrame:
     return ss[["bill_id", "ss_year", "SS"]].drop_duplicates()
 
 
+# Apply manual SS bill id fixes
+SS_ID_FIXES = {
+    "2019_2020": {"SB19-1025": "HB19-1025"},
+    "2021_2022": {"HB21-002": "HB21-1002", "HB21-003": "HB21-1003"},
+    "2023_2024": {
+        "SB23-1196": "HB23-1196",
+        "SB23-1006": "HB23-1006",
+        "SB24-1091": "HB24-1091",
+    },
+}
+
+
+def fix_ss_bill_ids(ss: pd.DataFrame, term: str) -> pd.DataFrame:
+    fixes = SS_ID_FIXES.get(term, {})
+    ss = ss.copy()
+    ss["bill_id"] = ss["bill_id"].replace(fixes)
+    return ss
+
+
 def apply_ss_and_commem(
     stages: pd.DataFrame, ss_term: pd.DataFrame, commem_term: pd.DataFrame
 ) -> pd.DataFrame:
@@ -541,34 +560,37 @@ def apply_ss_and_commem(
 
 
 def main():
-    term = "2015_2016"
-    print(f"Re-estimating CO {term}")
-    
-    # load phase
-    roster = load_roster(term)
-    details = load_bill_details(term, roster)
-    histories = load_bill_histories(term)
-    
-    # 
-    leg_achievement = compute_leg_achievement(details, histories)
-    commem = load_term_commem(term)
-    ss = load_term_ss(term)
-    bill_data = apply_ss_and_commem(leg_achievement, ss, commem)
+    for term in ["2015_2016", "2017_2018", "2019_2020", "2021_2022", "2023_2024"]:
+        print(f"Re-estimating CO {term}")
 
-    les = fn.calculate_les(bill_data, roster, term, ss_weight=10, reg_weight=5, com_weight=1)
-    les_nw = fn.calculate_les(bill_data, roster, term, ss_weight=5, reg_weight=5, com_weight=5)
+        roster = load_roster(term)
+        details = load_bill_details(term, roster)
+        histories = load_bill_histories(term)
 
-    key = ["term", "chamber", "data_name", "sponsor"]
-    les = les.merge(
-        les_nw[key + ["LES"]].rename(columns={"LES": "LES_nw"}),
-        on=key,
-        how="left",
-    )
+        leg_achievement = compute_leg_achievement(details, histories)
+        commem = load_term_commem(term)
+        ss = load_term_ss(term)
+        ss = fix_ss_bill_ids(ss, term)
+        bill_data = apply_ss_and_commem(leg_achievement, ss, commem)
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUTPUT_DIR / f"CO_LES_{term}_reestimated.csv"
-    les.to_csv(out_path, index=False)
-    print(f"Written to {out_path}")
+        les = fn.calculate_les(bill_data, roster, term, ss_weight=10, reg_weight=5, com_weight=1)
+        les_nw = fn.calculate_les(bill_data, roster, term, ss_weight=5, reg_weight=5, com_weight=5)
+
+        key = ["term", "chamber", "data_name", "sponsor"]
+        les = les.merge(
+            les_nw[key + ["LES"]].rename(columns={"LES": "LES_nw"}),
+            on=key,
+            how="left",
+        )
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = OUTPUT_DIR / f"CO_LES_{term}_reestimated.csv"
+        les.to_csv(out_path, index=False)
+        print(f"Written to {out_path}")
+
+        bills_path = OUTPUT_DIR / f"CO_LES_{term}_reestimated_coded_bills.csv"
+        bill_data.to_csv(bills_path, index=False)
+        print(f"Written to {bills_path}")
 
 
 if __name__ == "__main__":
