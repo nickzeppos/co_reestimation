@@ -16,4 +16,3 @@
 ## TODO
 - I have made the klarner data avaialble (from the .rdata file on dropbox) to the best of my ability, but I didn't actually merge anything in from those data sets. I assume this is where party/district info comes from for pre-18 info, but I didn't want to overstep (just wanted to match the old LES outputs)
 - Given that you'll note that party and district columns do exist in the 15/16 and 17/18 reestimations, they're just empty.
-- Probably should generate bill-level outputs for debug purposes
