@@ -240,33 +240,12 @@ def load_bill_details(term: str, roster: pd.DataFrame) -> pd.DataFrame:
         "S": roster[roster["chamber_code"] == "S"],
     }
 
-    if term == "2015_2016":
-        # 2015-RS sponsors are "LASTNAME INITIAL." — already match data_name format, just lowercase
-        is_2015 = bill_details["session"] == "2015-RS"
-        bill_details.loc[is_2015, "data_name"] = (
-            bill_details.loc[is_2015, "primary_sponsors"]
-            .str.split(";")
-            .str[0]
-            .str.strip()
-            .str.lower()
+    bill_details["data_name"] = [
+        derive_data_name(ps, roster_by_chamber[cc])
+        for ps, cc in zip(
+            bill_details["primary_sponsors"], bill_details["chamber_code"]
         )
-        
-        # have to actually use derive fn on new data
-        not_2015 = ~is_2015
-        bill_details.loc[not_2015, "data_name"] = [
-            derive_data_name(ps, roster_by_chamber[cc])
-            for ps, cc in zip(
-                bill_details.loc[not_2015, "primary_sponsors"],
-                bill_details.loc[not_2015, "chamber_code"],
-            )
-        ]
-    else:
-        bill_details["data_name"] = [
-            derive_data_name(ps, roster_by_chamber[cc])
-            for ps, cc in zip(
-                bill_details["primary_sponsors"], bill_details["chamber_code"]
-            )
-        ]
+    ]
 
     # I'm not sure we need these anymore w/ the new data.
     # term-specific overrides where automated matching resolves to the wrong legislator
@@ -392,6 +371,13 @@ def derive_data_name(primary_sponsors: str, roster: pd.DataFrame) -> str:
     # normalize
     raw = standardize_accents(raw.lower()).strip()
 
+    # 2015 disambiguation format: "lastname initial." (e.g. "becker j.") — strip the
+    # trailing initial, keep it around to narrow ambiguous lastname matches below.
+    trailing_m = re.match(r"^(.+) ([a-z])\.$", raw)
+    trailing_initial = trailing_m.group(2) if trailing_m else None
+    if trailing_m:
+        raw = trailing_m.group(1)
+
     # extract last name portion from sponsor string
     # 2015: bare last name e.g. "pettersen"
     # 2016+: "firstname [middle] lastname" e.g. "diane mitsch bush" -> "mitsch bush"
@@ -426,9 +412,13 @@ def derive_data_name(primary_sponsors: str, roster: pd.DataFrame) -> str:
     if len(matches) == 0:
         raise ValueError(f"No roster match found for sponsor '{raw}'")
 
-    # multiple last-name matches — try to narrow by first initial of sponsor
-    if len(parts) >= 2:
+    # multiple last-name matches — try to narrow by first initial of sponsor.
+    # prefer the 2015 trailing initial (e.g. "becker j." disambiguates to "becker j.")
+    # and fall back to first char of the sponsor's first name token.
+    first_initial = trailing_initial
+    if first_initial is None and len(parts) >= 2:
         first_initial = parts[0][0]
+    if first_initial is not None:
         # data_name "initial. lastname" -> initial is first char
         # data_name "lastname initial." -> initial is last word's first char
         narrowed = [
@@ -525,6 +515,23 @@ def load_term_ss(term: str) -> pd.DataFrame:
     return ss[["bill_id", "ss_year", "SS"]].drop_duplicates()
 
 
+def load_term_ss_master(term: str) -> pd.DataFrame:
+    # The LN master SS_Bills.csv covers all states/years in one file.
+    # bill_num is already in "hbYY-NNNN" / "sbYY-NNNN" form; just uppercase.
+    path = SS_DIR / "SS_Bills.csv"
+    if not path.exists():
+        raise FileNotFoundError(f"Missing master SS file: {path}")
+    df = pd.read_csv(path)
+    year_1, year_2 = parse_term(term)
+    df = df[(df["state"] == "CO") & (df["year"].isin([year_1, year_2]))].copy()
+    df["bill_id"] = (
+        df["bill_num"].astype(str).str.upper().str.replace(" ", "", regex=False)
+    )
+    df["ss_year"] = df["year"].astype(int)
+    df["SS"] = 1
+    return df[["bill_id", "ss_year", "SS"]].drop_duplicates()
+
+
 # Apply manual SS bill id fixes
 SS_ID_FIXES = {
     "2019_2020": {"SB19-1025": "HB19-1025"},
@@ -569,6 +576,11 @@ def apply_ss_and_commem(
 
 
 def main():
+    # 15/16 and 17/18 get dual outputs: one from the PVS annual files
+    # and one from the LN master file, since the two disagree materially
+    # on SS coverage for those terms.
+    DUAL_TERMS = {"2015_2016", "2017_2018"}
+
     for term in ["2015_2016", "2017_2018", "2019_2020", "2021_2022", "2023_2024"]:
         print(f"Re-estimating CO {term}")
 
@@ -578,28 +590,46 @@ def main():
 
         leg_achievement = compute_leg_achievement(details, histories)
         commem = load_term_commem(term)
-        ss = load_term_ss(term)
-        ss = fix_ss_bill_ids(ss, term)
-        bill_data = apply_ss_and_commem(leg_achievement, ss, commem)
 
-        les = fn.calculate_les(bill_data, roster, term, ss_weight=10, reg_weight=5, com_weight=1)
-        les_nw = fn.calculate_les(bill_data, roster, term, ss_weight=5, reg_weight=5, com_weight=5)
+        if term in DUAL_TERMS:
+            sources = [
+                ("_PVS", fix_ss_bill_ids(load_term_ss(term), term)),
+                ("_LN", fix_ss_bill_ids(load_term_ss_master(term), term)),
+            ]
+        else:
+            sources = [("", fix_ss_bill_ids(load_term_ss(term), term))]
 
-        key = ["term", "chamber", "data_name", "sponsor"]
-        les = les.merge(
-            les_nw[key + ["LES"]].rename(columns={"LES": "LES_nw"}),
-            on=key,
-            how="left",
-        )
+        # term-specific legislator exclusions applied before LES calc
+        if term == "2023_2024":
+            roster = roster[roster["sponsor"] != "Robert Rankin"].reset_index(drop=True)
 
-        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        out_path = OUTPUT_DIR / f"CO_LES_{term}_reestimated.csv"
-        les.to_csv(out_path, index=False)
-        print(f"Written to {out_path}")
+        for suffix, ss in sources:
+            bill_data = apply_ss_and_commem(leg_achievement.copy(), ss, commem)
 
-        bills_path = OUTPUT_DIR / f"CO_LES_{term}_reestimated_coded_bills.csv"
-        bill_data.to_csv(bills_path, index=False)
-        print(f"Written to {bills_path}")
+            les = fn.calculate_les(
+                bill_data, roster, term, ss_weight=10, reg_weight=5, com_weight=1
+            )
+            les_nw = fn.calculate_les(
+                bill_data, roster, term, ss_weight=5, reg_weight=5, com_weight=5
+            )
+
+            key = ["term", "chamber", "data_name", "sponsor"]
+            les = les.merge(
+                les_nw[key + ["LES"]].rename(columns={"LES": "LES_nw"}),
+                on=key,
+                how="left",
+            )
+
+            OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+            out_path = OUTPUT_DIR / f"CO_LES_{term}_reestimated{suffix}.csv"
+            les.to_csv(out_path, index=False)
+            print(f"Written to {out_path}")
+
+            bills_path = (
+                OUTPUT_DIR / f"CO_LES_{term}_reestimated_coded_bills{suffix}.csv"
+            )
+            bill_data.to_csv(bills_path, index=False)
+            print(f"Written to {bills_path}")
 
 
 if __name__ == "__main__":
