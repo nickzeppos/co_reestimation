@@ -602,6 +602,8 @@ def main():
         # term-specific legislator exclusions applied before LES calc
         if term == "2023_2024":
             roster = roster[roster["sponsor"] != "Robert Rankin"].reset_index(drop=True)
+        if term == "2017_2018":
+            roster = roster[roster["sponsor"] != "coram, don"].reset_index(drop=True)
 
         for suffix, ss in sources:
             bill_data = apply_ss_and_commem(leg_achievement.copy(), ss, commem)
